@@ -1,5 +1,7 @@
 import asyncio
+import logging
 from pyrogram import utils, raw
+from pyrogram import errors as py_errors
 from pyrogram.errors import AuthBytesInvalid
 from pyrogram.file_id import FileId, FileType, ThumbnailSource
 from pyrogram.session import Session, Auth
@@ -9,6 +11,7 @@ from Backend.helper.exceptions import FIleNotFound
 from Backend.helper.pyro import get_file_ids
 from Backend.pyrofork.bot import work_loads
 from pyrogram import Client, utils, raw
+from fastapi import HTTPException
 
 
 class ByteStreamer:
@@ -27,45 +30,52 @@ class ByteStreamer:
             self.__cached_file_ids[message_id] = file_id
         return self.__cached_file_ids[message_id]
 
-    async def yield_file(self, file_id: FileId, index: int, offset: int, first_part_cut: int, last_part_cut: int, part_count: int, chunk_size: int) -> Union[str, None]: # type: ignore
-        client = self.client
-        work_loads[index] += 1
-        LOGGER.debug(f"Starting to yielding file with client {index}.")
-        media_session = await self.generate_media_session(client, file_id)
-        current_part = 1
-        location = await self.get_location(file_id)
-        try:
-            r = await media_session.send(raw.functions.upload.GetFile(location=location, offset=offset, limit=chunk_size))
-            if isinstance(r, raw.types.upload.File):
-                while True:
-                    chunk = r.bytes
-                    if not chunk:
-                        break
-                    elif part_count == 1:
-                        yield chunk[first_part_cut:last_part_cut]
-                    elif current_part == 1:
-                        yield chunk[first_part_cut:]
-                    elif current_part == part_count:
-                        yield chunk[:last_part_cut]
-                    else:
-                        yield chunk
+    async def yield_file(media_session, location, file_size, chunk_size=64 * 1024):
+    offset = 0
+    max_retries = 3
 
-                    current_part += 1
-                    offset += chunk_size
+    while offset < file_size:
+        limit = min(chunk_size, file_size - offset)
+        attempt = 0
 
-                    if current_part > part_count:
-                        break
-                    
-                    r = await media_session.send(
-                        raw.functions.upload.GetFile(
-                            location=location, offset=offset, limit=chunk_size
-                        ),
-                    )
-        except (TimeoutError, AttributeError):
-            pass
-        finally:
-            LOGGER.debug("Finished yielding file with {current_part} parts.")
-            work_loads[index] -= 1
+        while True:
+            try:
+                # Try to fetch the chunk from Telegram
+                r = await media_session.send(
+                    raw.functions.upload.GetFile(location=location, offset=offset, limit=limit)
+                )
+                data = r.bytes  # adjust depending on returned object
+                if not data:
+                    # nothing returned — stop streaming
+                    return
+                yield data
+                offset += len(data)
+                break  # chunk succeeded -> break retry loop
+
+            except py_errors.exceptions.service_unavailable_503.Timeout as e:
+                attempt += 1
+                log.warning("GetFile Timeout (attempt %s/%s) offset=%s: %s", attempt, max_retries, offset, e)
+                if attempt >= max_retries:
+                    # Give a neat HTTP 503 so the client knows it was a server-side transient failure
+                    raise HTTPException(status_code=503, detail="Telegram upload.GetFile timeout, try again later.")
+                # exponential backoff
+                await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
+                continue
+
+            except py_errors.RPCError as e:
+                # Non-timeout RPC error from Telegram — log & return a 502/503
+                log.exception("Telegram RPCError during GetFile: %s", e)
+                raise HTTPException(status_code=502, detail="Telegram API error while streaming file.")
+
+            except asyncio.CancelledError:
+                # Client closed connection; stop without raising
+                log.info("Streaming cancelled by client at offset=%s", offset)
+                return
+
+            except Exception:
+                # Catch-all to avoid unhandled exceptions leaving the generator
+                log.exception("Unhandled error while streaming file at offset=%s", offset)
+                raise HTTPException(status_code=500, detail="Internal server error while streaming.")
 
     async def generate_media_session(self, client: Client, file_id: FileId) -> Session:
         media_session = client.media_sessions.get(file_id.dc_id, None)
