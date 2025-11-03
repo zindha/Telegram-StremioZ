@@ -30,7 +30,7 @@ class ByteStreamer:
             self.__cached_file_ids[message_id] = file_id
         return self.__cached_file_ids[message_id]
 
-    async def yield_file(media_session, location, file_size, chunk_size=64 * 1024):
+async def yield_file(media_session, location, file_size, chunk_size=64 * 1024):
     offset = 0
     max_retries = 3
 
@@ -44,38 +44,36 @@ class ByteStreamer:
                 r = await media_session.send(
                     raw.functions.upload.GetFile(location=location, offset=offset, limit=limit)
                 )
-                data = r.bytes  # adjust depending on returned object
+
+                data = getattr(r, "bytes", None)
                 if not data:
-                    # nothing returned — stop streaming
                     return
+
                 yield data
                 offset += len(data)
-                break  # chunk succeeded -> break retry loop
+                break  # Success, move to next chunk
 
             except py_errors.exceptions.service_unavailable_503.Timeout as e:
                 attempt += 1
-                log.warning("GetFile Timeout (attempt %s/%s) offset=%s: %s", attempt, max_retries, offset, e)
+                log.warning(f"GetFile Timeout ({attempt}/{max_retries}) offset={offset}: {e}")
                 if attempt >= max_retries:
-                    # Give a neat HTTP 503 so the client knows it was a server-side transient failure
-                    raise HTTPException(status_code=503, detail="Telegram upload.GetFile timeout, try again later.")
-                # exponential backoff
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Telegram timeout while downloading. Try again later."
+                    )
                 await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
-                continue
 
             except py_errors.RPCError as e:
-                # Non-timeout RPC error from Telegram — log & return a 502/503
-                log.exception("Telegram RPCError during GetFile: %s", e)
-                raise HTTPException(status_code=502, detail="Telegram API error while streaming file.")
+                log.exception(f"Telegram RPCError: {e}")
+                raise HTTPException(status_code=502, detail="Telegram API error during stream.")
 
             except asyncio.CancelledError:
-                # Client closed connection; stop without raising
-                log.info("Streaming cancelled by client at offset=%s", offset)
+                log.info(f"Streaming cancelled at offset={offset}")
                 return
 
-            except Exception:
-                # Catch-all to avoid unhandled exceptions leaving the generator
-                log.exception("Unhandled error while streaming file at offset=%s", offset)
-                raise HTTPException(status_code=500, detail="Internal server error while streaming.")
+            except Exception as e:
+                log.exception(f"Unhandled error while streaming: {e}")
+                raise HTTPException(status_code=500, detail="Internal streaming error.")
 
     async def generate_media_session(self, client: Client, file_id: FileId) -> Session:
         media_session = client.media_sessions.get(file_id.dc_id, None)
