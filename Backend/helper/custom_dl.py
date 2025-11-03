@@ -157,8 +157,10 @@ class ByteStreamer:
             current_offset = start_offset
             max_retries = 3
 
+            MAX_TELEGRAM_CHUNK = 512 * 1024  # 512 KB hard Telegram limit
+            
             while current_offset < end_offset:
-                limit = min(chunk_size, end_offset - current_offset)
+                limit = min(MAX_TELEGRAM_CHUNK, end_offset - current_offset)
                 attempt = 0
 
                 while True:
