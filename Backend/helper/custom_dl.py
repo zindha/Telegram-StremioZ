@@ -21,6 +21,9 @@ class ByteStreamer:
         self.__cached_file_ids: Dict[int, FileId] = {}
         asyncio.create_task(self.clean_cache())
 
+    async def clean_cache(self):
+    pass
+
     async def get_file_properties(self, chat_id: int, message_id: int) -> FileId:
         if message_id not in self.__cached_file_ids:
             file_id = await get_file_ids(self.client, int(chat_id), int(message_id))
