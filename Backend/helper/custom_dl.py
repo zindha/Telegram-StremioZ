@@ -33,7 +33,7 @@ class ByteStreamer:
             self.__cached_file_ids[message_id] = file_id
         return self.__cached_file_ids[message_id]
 
-    async def yield_file(media_session, location, file_size, chunk_size=64 * 1024):
+    async def yield_file(self, media_session, location, file_size, chunk_size=64 * 1024):
         offset = 0
         max_retries = 3
 
@@ -43,7 +43,6 @@ class ByteStreamer:
 
             while True:
                 try:
-                    # Try to fetch the chunk from Telegram
                     r = await media_session.send(
                         raw.functions.upload.GetFile(location=location, offset=offset, limit=limit)
                     )
@@ -54,11 +53,11 @@ class ByteStreamer:
 
                     yield data
                     offset += len(data)
-                    break  # Success, move to next chunk
+                    break
 
                 except py_errors.exceptions.service_unavailable_503.Timeout as e:
                     attempt += 1
-                    log.warning(f"GetFile Timeout ({attempt}/{max_retries}) offset={offset}: {e}")
+                    LOGGER.warning(f"GetFile Timeout ({attempt}/{max_retries}) offset={offset}: {e}")
                     if attempt >= max_retries:
                         raise HTTPException(
                             status_code=503,
@@ -67,16 +66,17 @@ class ByteStreamer:
                     await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
 
                 except py_errors.RPCError as e:
-                    log.exception(f"Telegram RPCError: {e}")
+                    LOGGER.exception(f"Telegram RPCError: {e}")
                     raise HTTPException(status_code=502, detail="Telegram API error during stream.")
-    
+
                 except asyncio.CancelledError:
-                    log.info(f"Streaming cancelled at offset={offset}")
+                    LOGGER.info(f"Streaming cancelled at offset={offset}")
                     return
 
                 except Exception as e:
-                    log.exception(f"Unhandled error while streaming: {e}")
+                    LOGGER.exception(f"Unhandled error while streaming: {e}")
                     raise HTTPException(status_code=500, detail="Internal streaming error.")
+
 
     async def generate_media_session(self, client: Client, file_id: FileId) -> Session:
         media_session = client.media_sessions.get(file_id.dc_id, None)
